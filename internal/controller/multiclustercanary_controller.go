@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -57,18 +56,15 @@ func (r *MultiClusterCanaryReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	mcc := &multiclusterv1alpha1.MultiClusterCanary{}
 	if err := r.Get(ctx, req.NamespacedName, mcc); err != nil {
-		log.Error(err, "")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	clusterSelector, err := metav1.LabelSelectorAsSelector(&mcc.Spec.GitopsClusterSelector)
 	if err != nil {
-		log.Error(err, "")
 		return ctrl.Result{Requeue: true}, err
 	}
 	gitopsClusters := &multiclusterv1alpha1.GitopsClusterList{}
 	if err := r.List(ctx, gitopsClusters, client.MatchingLabelsSelector{Selector: clusterSelector}); err != nil {
-		log.Error(err, "")
 		return ctrl.Result{RequeueAfter: mcc.GetRequeueAfter()}, err
 	}
 
@@ -77,35 +73,46 @@ func (r *MultiClusterCanaryReconciler) Reconcile(ctx context.Context, req ctrl.R
 		clusterKeys = append(clusterKeys, fmt.Sprintf("%s/%s", cluster.Namespace, cluster.Name))
 	}
 
-	if len(mcc.Status.Clusters) > 0 {
-		staleClusters := diff(mcc.Status.Clusters, clusterKeys)
-		if len(staleClusters) > 0 {
-			log.Info("found stale clusters", "keys", staleClusters)
-		}
-		for _, staleCluster := range staleClusters {
-			staleClusterKey := getNamespacedNameFromString(staleCluster)
-			staleClusterObj := &multiclusterv1alpha1.GitopsCluster{}
-			if err := r.Get(ctx, staleClusterKey, staleClusterObj); err == nil {
-				kubeClient, err := r.getKubeClient(ctx, staleClusterObj)
+	var desiredCanaryRefs []multiclusterv1alpha1.CanaryObjRef
+	for _, cluster := range gitopsClusters.Items {
+		desiredCanaryRefs = append(desiredCanaryRefs, multiclusterv1alpha1.CanaryObjRef{
+			ClusterName:      cluster.Name,
+			ClusterNamespace: cluster.Namespace,
+			Name:             mcc.Name,
+			Namespace:        mcc.GetCanaryNamespace(),
+		})
+	}
+
+	if len(mcc.Status.Inevntory) > 0 {
+		staleCanaryRefs := diff(mcc.Status.Inevntory, desiredCanaryRefs)
+		for _, staleCanaryRef := range staleCanaryRefs {
+			clusterKey := types.NamespacedName{
+				Name:      staleCanaryRef.ClusterName,
+				Namespace: staleCanaryRef.ClusterNamespace,
+			}
+			clusterObj := &multiclusterv1alpha1.GitopsCluster{}
+			if err := r.Get(ctx, clusterKey, clusterObj); err == nil {
+				kubeClient, err := r.getKubeClient(ctx, clusterObj)
 				if err != nil {
 					return ctrl.Result{RequeueAfter: mcc.GetRequeueAfter()}, err
 				}
-				staleCanary := &flaggerv1.Canary{
+
+				staleCanaryObj := &flaggerv1.Canary{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      mcc.Name,
-						Namespace: mcc.Spec.CanaryNamespace,
+						Name:      staleCanaryRef.Name,
+						Namespace: staleCanaryRef.Namespace,
 					},
 				}
-				if err = kubeClient.Delete(ctx, staleCanary, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-					log.Error(err, "")
+				if err = kubeClient.Delete(ctx, staleCanaryObj, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
 					return ctrl.Result{RequeueAfter: mcc.GetRequeueAfter()}, err
 				}
-				log.Info("deleted stale cluster successfully", "cluster", staleCluster)
+
+				log.Info("deleted stale canary successfully", "key", staleCanaryRef)
 			}
 		}
 	}
 
-	mcc.Status.Clusters = clusterKeys
+	mcc.Status.Inevntory = desiredCanaryRefs
 	if err = r.Status().Update(ctx, mcc); err != nil {
 		return ctrl.Result{RequeueAfter: mcc.GetRequeueAfter()},
 			fmt.Errorf("failed to update status: %w", err)
@@ -121,9 +128,13 @@ func (r *MultiClusterCanaryReconciler) Reconcile(ctx context.Context, req ctrl.R
 		Analysis:      &mcc.Spec.Analysis.CanaryAnalysis,
 	}
 
-	for _, clusterKey := range clusterKeys {
+	for _, desiredCanaryRef := range desiredCanaryRefs {
 		cluster := &multiclusterv1alpha1.GitopsCluster{}
-		if err := r.Client.Get(ctx, getNamespacedNameFromString(clusterKey), cluster); err != nil {
+		clusterKey := types.NamespacedName{
+			Namespace: desiredCanaryRef.ClusterNamespace,
+			Name:      desiredCanaryRef.ClusterName,
+		}
+		if err := r.Client.Get(ctx, clusterKey, cluster); err != nil {
 			return ctrl.Result{RequeueAfter: mcc.GetRequeueAfter()}, err
 		}
 		kubeClient, err := r.getKubeClient(ctx, cluster)
@@ -132,17 +143,17 @@ func (r *MultiClusterCanaryReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 
 		canaryKey := types.NamespacedName{
-			Namespace: mcc.Spec.CanaryNamespace,
-			Name:      mcc.Name,
+			Namespace: desiredCanaryRef.Namespace,
+			Name:      desiredCanaryRef.Name,
 		}
-		existingCanary := &flaggerv1.Canary{}
-		err = kubeClient.Get(ctx, canaryKey, existingCanary)
+		canaryObj := &flaggerv1.Canary{}
+		err = kubeClient.Get(ctx, canaryKey, canaryObj)
 		if errors.IsNotFound(err) {
 			// TODO: override serivce and analysis config according to cluster label selector.
 			canary := &flaggerv1.Canary{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      mcc.Name,
-					Namespace: mcc.Spec.CanaryNamespace,
+					Namespace: mcc.GetCanaryNamespace(),
 					OwnerReferences: []metav1.OwnerReference{
 						*metav1.NewControllerRef(mcc, schema.GroupVersionKind{
 							Group:   multiclusterv1alpha1.GroupVersion.Group,
@@ -162,10 +173,10 @@ func (r *MultiClusterCanaryReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{RequeueAfter: mcc.GetRequeueAfter()}, err
 		}
 
-		if diff := cmp.Diff(existingCanary.Spec, commonCanarySpec); diff != "" {
+		if diff := cmp.Diff(canaryObj.Spec, commonCanarySpec); diff != "" {
 			log.Info("found diff in downstream canary", "cluster", clusterKey, "diff", diff)
-			existingCanary.Spec = commonCanarySpec
-			if err = kubeClient.Update(ctx, existingCanary); err != nil {
+			canaryObj.Spec = commonCanarySpec
+			if err = kubeClient.Update(ctx, canaryObj); err != nil {
 				return ctrl.Result{RequeueAfter: mcc.GetRequeueAfter()}, err
 			}
 			log.Info("updated canary successfully", "cluster", clusterKey)
@@ -184,28 +195,8 @@ func (r *MultiClusterCanaryReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Complete(r)
 }
 
-func getNamespacedNameFromString(s string) types.NamespacedName {
-	return types.NamespacedName{
-		Namespace: strings.Split(s, "/")[0],
-		Name:      strings.Split(s, "/")[1],
-	}
-}
-
-func diff(a, b []string) []string {
-	mb := make(map[string]struct{}, len(b))
-	for _, x := range b {
-		mb[x] = struct{}{}
-	}
-	var diff []string
-	for _, x := range a {
-		if _, found := mb[x]; !found {
-			diff = append(diff, x)
-		}
-	}
-	return diff
-}
-
-func (r *MultiClusterCanaryReconciler) getKubeClient(ctx context.Context, gitopsClusterObj *multiclusterv1alpha1.GitopsCluster) (client.Client, error) {
+func (r *MultiClusterCanaryReconciler) getKubeClient(ctx context.Context,
+	gitopsClusterObj *multiclusterv1alpha1.GitopsCluster) (client.Client, error) {
 	secret := &corev1.Secret{}
 	secretKey := types.NamespacedName{
 		Namespace: gitopsClusterObj.Namespace,
@@ -244,4 +235,18 @@ func (r *MultiClusterCanaryReconciler) getKubeClient(ctx context.Context, gitops
 	}
 
 	return kubeClient, err
+}
+
+func diff(a, b []multiclusterv1alpha1.CanaryObjRef) []multiclusterv1alpha1.CanaryObjRef {
+	mb := make(map[multiclusterv1alpha1.CanaryObjRef]struct{}, len(b))
+	for _, x := range b {
+		mb[x] = struct{}{}
+	}
+	var diff []multiclusterv1alpha1.CanaryObjRef
+	for _, x := range a {
+		if _, found := mb[x]; !found {
+			diff = append(diff, x)
+		}
+	}
+	return diff
 }

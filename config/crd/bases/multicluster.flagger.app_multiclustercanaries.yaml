@@ -1035,7 +1035,7 @@ spec:
                       to tolerate after doing a full rollback of all the Canaries.
                       Used only if Type is "pragmatic". Defaults to 3.
                     type: integer
-                  promotionStrategy:
+                  type:
                     description: The type of promotion/rollback strategy.
                     enum:
                     - pragmatic
@@ -1043,7 +1043,7 @@ spec:
                     - permissive
                     type: string
                 required:
-                - promotionStrategy
+                - type
                 type: object
               routeRef:
                 description: Reference to APISIX route resource
@@ -4049,7 +4049,6 @@ spec:
                 type: object
             required:
             - analysis
-            - canaryNamespace
             - gitopsClusterSelector
             - interval
             - service
@@ -4058,9 +4057,23 @@ spec:
           status:
             description: MultiClusterCanaryStatus defines the observed state of MultiClusterCanary
             properties:
-              clusters:
+              inventory:
                 items:
-                  type: string
+                  properties:
+                    cluster:
+                      type: string
+                    clusterNamespace:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - cluster
+                  - clusterNamespace
+                  - name
+                  - namespace
+                  type: object
                 type: array
             type: object
         type: object

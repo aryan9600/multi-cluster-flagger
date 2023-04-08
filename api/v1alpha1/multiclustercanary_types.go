@@ -30,8 +30,8 @@ type MultiClusterCanarySpec struct {
 	// +required
 	GitopsClusterSelector metav1.LabelSelector `json:"gitopsClusterSelector"`
 
-	// +required
-	CanaryNamespace string `json:"canaryNamespace"`
+	// +optional
+	CanaryNamespace string `json:"canaryNamespace,omitempty"`
 
 	// TargetRef references a target resource.
 	// +required
@@ -124,7 +124,7 @@ type PromotionStrategy struct {
 	// The type of promotion/rollback strategy.
 	// +kubebuilder:validation:Enum=pragmatic;strict;permissive
 	// +required
-	Type string `json:"promotionStrategy"`
+	Type string `json:"type"`
 	// FailedRetriesThreshold is the no. of faild retries to tolerate
 	// after doing a full rollback of all the Canaries.
 	// Used only if Type is "pragmatic". Defaults to 3.
@@ -134,11 +134,25 @@ type PromotionStrategy struct {
 
 // MultiClusterCanaryStatus defines the observed state of MultiClusterCanary
 type MultiClusterCanaryStatus struct {
-	Clusters []string `json:"clusters,omitempty"`
+	Inevntory []CanaryObjRef `json:"inventory,omitempty"`
+}
+
+type CanaryObjRef struct {
+	ClusterName      string `json:"cluster"`
+	ClusterNamespace string `json:"clusterNamespace"`
+	Name             string `json:"name"`
+	Namespace        string `json:"namespace"`
 }
 
 func (obj MultiClusterCanary) GetRequeueAfter() time.Duration {
 	return obj.Spec.Interval.Duration
+}
+
+func (obj MultiClusterCanary) GetCanaryNamespace() string {
+	if obj.Spec.CanaryNamespace != "" {
+		return obj.Spec.CanaryNamespace
+	}
+	return obj.Namespace
 }
 
 //+kubebuilder:object:root=true
