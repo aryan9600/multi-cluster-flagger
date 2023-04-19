@@ -73,7 +73,7 @@ type MultiClusterCanarySpec struct {
 
 	// PromotionStrategy is the strategy to be used for promotion/rollback.
 	// +required
-	PromotionStrategy PromotionStrategy `json:"promotionStrategy,omitempty"`
+	PromotionStrategy PromotionStrategy `json:"promotionStrategy"`
 }
 
 type MultiClusterCanaryService struct {
@@ -134,14 +134,47 @@ type PromotionStrategy struct {
 
 // MultiClusterCanaryStatus defines the observed state of MultiClusterCanary
 type MultiClusterCanaryStatus struct {
-	Inevntory []CanaryObjRef `json:"inventory,omitempty"`
+	Inevntory []CanaryObjRef          `json:"inventory,omitempty"`
+	Phase     MultiClusterCanaryPhase `json:"phase,omitempty"`
 }
 
 type CanaryObjRef struct {
-	ClusterName      string `json:"cluster"`
-	ClusterNamespace string `json:"clusterNamespace"`
-	Name             string `json:"name"`
-	Namespace        string `json:"namespace"`
+	ClusterName      string      `json:"cluster"`
+	ClusterNamespace string      `json:"clusterNamespace"`
+	Name             string      `json:"name"`
+	Namespace        string      `json:"namespace"`
+	State            CanaryState `json:"state"`
+	Retries          int         `json:"retries"`
+}
+
+type MultiClusterCanaryPhase string
+
+type CanaryState string
+
+const (
+	RolloutApproved CanaryState = "RolloutApproved"
+	// Progressing       CanaryState = "Progressing"
+	PromotionApproved CanaryState = "PromotionApproved"
+	// Promoted          CanaryState = "Promoted"
+	Retrying  CanaryState = "Retrying"
+	Succeeded CanaryState = "Succeeded"
+	Failed    CanaryState = "Failed"
+)
+
+const (
+	PendingRolloutApproval   MultiClusterCanaryPhase = "PendingRolloutApproval"
+	WaitingProgress          MultiClusterCanaryPhase = "WaitingProgress"
+	Progressing              MultiClusterCanaryPhase = "Progressing"
+	PendingPromotionApproval MultiClusterCanaryPhase = "PendingPromotionApproval"
+	WaitingPromotion         MultiClusterCanaryPhase = "WaitingPromotion"
+	Promoted                 MultiClusterCanaryPhase = "Promoted"
+	PendingRollback          MultiClusterCanaryPhase = "PendingRollback"
+	RolledBack               MultiClusterCanaryPhase = "RolledBack"
+)
+
+type CanaryWebhookState struct {
+	ConfirmRollout   bool `json:"confirmRollout,omitempty"`
+	ConfirmPromotion bool `json:"confirmPromotion,omitempty"`
 }
 
 func (obj MultiClusterCanary) GetRequeueAfter() time.Duration {

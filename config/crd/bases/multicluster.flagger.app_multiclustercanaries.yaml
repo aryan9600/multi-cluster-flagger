@@ -4051,6 +4051,7 @@ spec:
             - analysis
             - gitopsClusterSelector
             - interval
+            - promotionStrategy
             - service
             - targetRef
             type: object
@@ -4068,13 +4069,21 @@ spec:
                       type: string
                     namespace:
                       type: string
+                    retries:
+                      type: integer
+                    state:
+                      type: string
                   required:
                   - cluster
                   - clusterNamespace
                   - name
                   - namespace
+                  - retries
+                  - state
                   type: object
                 type: array
+              phase:
+                type: string
             type: object
         type: object
     served: true
