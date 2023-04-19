@@ -18,6 +18,8 @@ package main
 
 import (
 	"flag"
+	"log"
+	"net/url"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -33,14 +35,20 @@ import (
 
 	multiclusterv1alpha1 "github.com/aryan9600/multi-cluster-flagger/api/v1alpha1"
 	flaggerv1 "github.com/fluxcd/flagger/pkg/apis/flagger/v1beta1"
+	"github.com/fluxcd/flagger/pkg/logger"
 
 	"github.com/aryan9600/multi-cluster-flagger/internal/controller"
+	"github.com/aryan9600/multi-cluster-flagger/internal/coordinator"
 	//+kubebuilder:scaffold:imports
 )
 
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+)
+
+var (
+	webhookAddr string
 )
 
 func init() {
@@ -57,6 +65,7 @@ func main() {
 	var probeAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&webhookAddr, "webhook-addr", "", "The address the webhook server will run on.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -95,6 +104,7 @@ func main() {
 	if err = (&controller.MultiClusterCanaryReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Host:   webhookAddr,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MultiClusterCanary")
 		os.Exit(1)
@@ -110,8 +120,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	u, err := url.Parse(webhookAddr)
+	if err != nil {
+		setupLog.Error(err, "could not parse webhook addr")
+		os.Exit(1)
+	}
+
+	zapLogger, err := logger.NewLoggerWithEncoding("debug", "json")
+	if err != nil {
+		log.Fatalf("Error creating logger: %v", err)
+	}
+	defer zapLogger.Sync()
+
+	c := coordinator.NewCoordinator(u.Port(), mgr.GetClient(), zapLogger)
+	ctx := ctrl.SetupSignalHandler()
+
+	setupLog.Info("starting coordinator server")
+	go c.ListenAndServe(ctx.Done())
+
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
