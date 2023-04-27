@@ -103,7 +103,7 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 
 	clusterName := payload.Metadata["clusterName"]
 	clusterNamespace := payload.Metadata["clusterNamespace"]
-	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace)
+	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace, "webhook", "confirm-rollout")
 
 	mccObj, err := c.getMultiClusterCanary(payload.Name, payload.Metadata["mccNamespace"])
 	if err != nil {
@@ -111,7 +111,7 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	logger.Infof("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
+	logger.Debugf("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
 
 	if mccObj.Status.Phase == multiclusterv1alpha1.Promoted ||
 		mccObj.Status.Phase == multiclusterv1alpha1.RolledBack ||
@@ -166,7 +166,7 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 		logger.Infof("updated mcc %s/%s phase to %s", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase)
 		w.WriteHeader(http.StatusOK)
 	} else {
-		logger.Info("waiting for other canaries' rollout to be approved")
+		logger.Debug("waiting for other canaries' rollout to be approved")
 		w.WriteHeader(http.StatusBadRequest)
 	}
 }
@@ -181,7 +181,7 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 
 	clusterName := payload.Metadata["clusterName"]
 	clusterNamespace := payload.Metadata["clusterNamespace"]
-	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace)
+	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace, "webhook", "confirm-promotion")
 
 	mccObj, err := c.getMultiClusterCanary(payload.Name, payload.Metadata["mccNamespace"])
 	if err != nil {
@@ -189,7 +189,7 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	logger.Infof("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
+	logger.Debugf("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
 
 	if mccObj.Status.Phase == multiclusterv1alpha1.Progressing {
 		mccObj.Status.Phase = multiclusterv1alpha1.PendingPromotionApproval
@@ -217,7 +217,6 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 		}
 		if item.State != multiclusterv1alpha1.PromotionApproved {
 			shouldBePromoted = false
-			break
 		}
 	}
 
@@ -227,7 +226,7 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !shouldBePromoted {
-		logger.Info("waiting for other canaries' promotion to be approved")
+		logger.Debug("waiting for other canaries' promotion to be approved")
 		w.WriteHeader(http.StatusBadRequest)
 	} else {
 		mccObj.Status.Phase = multiclusterv1alpha1.Promoted
@@ -251,7 +250,7 @@ func (c *Coordinator) PostRollout(w http.ResponseWriter, r *http.Request) {
 
 	clusterName := payload.Metadata["clusterName"]
 	clusterNamespace := payload.Metadata["clusterNamespace"]
-	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace)
+	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace, "webhook", "post-rollout")
 
 	mccObj, err := c.getMultiClusterCanary(payload.Name, payload.Metadata["mccNamespace"])
 	if err != nil {
@@ -259,59 +258,73 @@ func (c *Coordinator) PostRollout(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	logger.Infof("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
+	logger.Debugf("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
 
-	if payload.Phase == flaggerv1.CanaryPhaseFailed {
+	// We don't need to do anything if we are the ones who approved the rollback.
+	if payload.Phase == flaggerv1.CanaryPhaseFailed && mccObj.Status.Phase != multiclusterv1alpha1.RolledBack {
 		if mccObj.Spec.PromotionStrategy.Type == "strict" {
-			if mccObj.Status.Phase != multiclusterv1alpha1.RolledBack {
-				mccObj.Status.Phase = multiclusterv1alpha1.PendingRollback
-				err := retry.OnError(retry.DefaultRetry, func(err error) bool {
-					return err != nil
-				}, func() error {
-					return c.Client.Status().Update(context.TODO(), mccObj)
-				})
-				if err != nil {
-					logger.Errorf("could not update mcc %s/%s phase to %s: %w", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase, err)
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				logger.Infof("updated mcc %s/%s phase to %s", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase)
+			// mark the phase as PendingRollback because we want to rollback ALL canaries.
+			mccObj.Status.Phase = multiclusterv1alpha1.PendingRollback
+
+			err := retry.OnError(retry.DefaultRetry, func(err error) bool {
+				return err != nil
+			}, func() error {
+				return c.Client.Status().Update(context.TODO(), mccObj)
+			})
+			if err != nil {
+				logger.Errorf("could not update mcc %s/%s phase to %s: %w", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase, err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
 			}
+			logger.Infof("updated mcc %s/%s phase to %s", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase)
 		} else if mccObj.Spec.PromotionStrategy.Type == "pragmatic" {
 			foundCanary := false
 			for i, item := range mccObj.Status.Inevntory {
 				if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
 					foundCanary = true
 					// if we have exhausted the allowed no. of retries, then do a full rollback
-					if item.Retries == *mccObj.Spec.PromotionStrategy.FailedRetriesThreshold {
+					if item.Retries == mccObj.GetFailedRetriesThreshold() {
 						item.Retries = 0
+						item.State = multiclusterv1alpha1.Failed
 						mccObj.Status.Phase = multiclusterv1alpha1.PendingRollback
 					} else {
+						logger.Infof("retrying canary %s/%s in cluster %s/%s",
+							payload.Namespace, payload.Name, clusterNamespace, clusterName)
+
 						if err := c.retryCanary(clusterName, clusterNamespace,
 							mccObj.Spec.TargetRef.Name, payload.Namespace); err != nil {
+							logger.Errorf("could not update deployment %s/%s retry annotation in %s/%s: %w",
+								mccObj.Spec.TargetRef.Name, payload.Namespace, clusterName, clusterNamespace, err)
 							w.WriteHeader(http.StatusInternalServerError)
 							return
 						}
 						item.Retries += 1
+						item.State = multiclusterv1alpha1.Retrying
 					}
+
 					mccObj.Status.Inevntory[i] = item
 					if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
+						logger.Errorf("could not update mcc %s/%s status: %w", mccObj.Namespace, mccObj.Name, err)
 						w.WriteHeader(http.StatusInternalServerError)
 						return
 					}
 				}
 			}
+
 			if !foundCanary {
+				logger.Errorf("could not find a matching canary in mcc %s/%s", mccObj.Namespace, mccObj.Name)
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 		}
 	} else if payload.Phase == flaggerv1.CanaryPhaseSucceeded {
+		// mark the canary obj as succeeded
 		for i, item := range mccObj.Status.Inevntory {
 			if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
 				item.State = multiclusterv1alpha1.Succeeded
 				mccObj.Status.Inevntory[i] = item
 				if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
+					logger.Errorf("could not update mcc %s/%s status: %w", mccObj.Namespace, mccObj.Name, err)
 					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
@@ -321,13 +334,15 @@ func (c *Coordinator) PostRollout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// retryCanary builds a client for the required cluster and uses that to
+// update the target Deployment's pod's annotation to force a retry of the Canary.
 func (c *Coordinator) retryCanary(clusterName, clusterNamespace, deploymentName, deploymentNamespace string) error {
 	clusterKey := types.NamespacedName{
 		Namespace: clusterNamespace,
 		Name:      clusterName,
 	}
 	clusterObj := &multiclusterv1alpha1.GitopsCluster{}
-	if err := c.Get(context.TODO(), clusterKey, clusterObj); err == nil {
+	if err := c.Get(context.TODO(), clusterKey, clusterObj); err != nil {
 		return err
 	}
 	kubeClient, err := c.getClientForCluster(clusterObj)
@@ -339,16 +354,20 @@ func (c *Coordinator) retryCanary(clusterName, clusterNamespace, deploymentName,
 		Namespace: deploymentNamespace,
 		Name:      deploymentName,
 	}
-	deployment := &appsv1.Deployment{}
-	if err = kubeClient.Get(context.TODO(), deploymentKey, deployment); err != nil {
-		return err
-	}
-	if deployment.Spec.Template.Annotations == nil {
-		deployment.Spec.Template.Annotations = map[string]string{}
-	}
-	// add an annotation to the pod template to trigger a retry
-	deployment.Spec.Template.Annotations[RetryKey] = time.Now().UTC().String()
-	if err = kubeClient.Update(context.TODO(), deployment); err != nil {
+	if err = retry.OnError(retry.DefaultRetry, func(err error) bool {
+		return err != nil
+	}, func() error {
+		deployment := &appsv1.Deployment{}
+		if err = kubeClient.Get(context.TODO(), deploymentKey, deployment); err != nil {
+			return err
+		}
+		if deployment.Spec.Template.Annotations == nil {
+			deployment.Spec.Template.Annotations = map[string]string{}
+		}
+		// add an annotation to the pod template to trigger a retry
+		deployment.Spec.Template.Annotations[RetryKey] = time.Now().Format(time.RFC3339Nano)
+		return kubeClient.Update(context.TODO(), deployment)
+	}); err != nil {
 		return err
 	}
 	return nil
@@ -364,7 +383,7 @@ func (c *Coordinator) Rollback(w http.ResponseWriter, r *http.Request) {
 
 	clusterName := payload.Metadata["clusterName"]
 	clusterNamespace := payload.Metadata["clusterNamespace"]
-	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace)
+	logger := c.logger.With("leaf cluster name", clusterName, "leaf cluster namespace", clusterNamespace, "path", "rollback")
 
 	mccObj, err := c.getMultiClusterCanary(payload.Name, payload.Metadata["mccNamespace"])
 	if err != nil {
@@ -372,19 +391,35 @@ func (c *Coordinator) Rollback(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	logger.Infof("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
+	logger.Debugf("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
 
-	if mccObj.Status.Phase == multiclusterv1alpha1.PendingRollback {
+	// If the object is pending rollback or has been marked as rolled back, then we approve the rollback of all Canaries
+	// and mark them as failed.
+	if mccObj.Status.Phase == multiclusterv1alpha1.PendingRollback || mccObj.Status.Phase == multiclusterv1alpha1.RolledBack {
+		foundCanary := false
+		for i, item := range mccObj.Status.Inevntory {
+			if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
+				foundCanary = true
+				item.State = multiclusterv1alpha1.Failed
+				mccObj.Status.Inevntory[i] = item
+			}
+		}
+		if !foundCanary {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		mccObj.Status.Phase = multiclusterv1alpha1.RolledBack
 		if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
 			logger.Errorf("could not update mcc %s/%s phase to %s: %w", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase, err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+
 		logger.Infof("updated mcc %s/%s phase to %s", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase)
 		w.WriteHeader(http.StatusOK)
 	} else {
-		logger.Info("skipping rollback for mcc %s/%s", mccObj.Namespace, mccObj.Name)
+		logger.Debugf("skipping rollback for mcc %s/%s", mccObj.Namespace, mccObj.Name)
 		w.WriteHeader(http.StatusBadRequest)
 	}
 }

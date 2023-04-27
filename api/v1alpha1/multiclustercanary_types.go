@@ -188,6 +188,13 @@ func (obj MultiClusterCanary) GetCanaryNamespace() string {
 	return obj.Namespace
 }
 
+func (obj MultiClusterCanary) GetFailedRetriesThreshold() int {
+	if obj.Spec.PromotionStrategy.FailedRetriesThreshold == nil {
+		return 3
+	}
+	return *obj.Spec.PromotionStrategy.FailedRetriesThreshold
+}
+
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 
