@@ -140,12 +140,13 @@ type MultiClusterCanaryStatus struct {
 }
 
 type CanaryObjRef struct {
-	ClusterName      string      `json:"cluster"`
-	ClusterNamespace string      `json:"clusterNamespace"`
-	Name             string      `json:"name"`
-	Namespace        string      `json:"namespace"`
-	State            CanaryState `json:"state"`
-	Retries          int         `json:"retries"`
+	ClusterName                string      `json:"cluster"`
+	ClusterNamespace           string      `json:"clusterNamespace"`
+	Name                       string      `json:"name"`
+	Namespace                  string      `json:"namespace"`
+	State                      CanaryState `json:"state"`
+	Retries                    int         `json:"retries"`
+	LastPromotedRetryTimestamp string      `json:"lastPromotedRetryTimestamp,omitempty"`
 }
 
 type MultiClusterCanaryPhase string

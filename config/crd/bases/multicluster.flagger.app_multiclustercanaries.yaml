@@ -4065,6 +4065,8 @@ spec:
                       type: string
                     clusterNamespace:
                       type: string
+                    lastPromotedRetryTimestamp:
+                      type: string
                     name:
                       type: string
                     namespace:

@@ -115,6 +115,9 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Debugf("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
 
+	// we don't check for !PendingRolloutApproval instead here because we might get
+	// rollout approval confirmations from downstream Canaries after we have approved
+	// the rollout of other Canaries (eg: the request came after the timeout).
 	if mccObj.Status.Phase == multiclusterv1alpha1.Promoted ||
 		mccObj.Status.Phase == multiclusterv1alpha1.RolledBack ||
 		mccObj.Status.Phase == "" {
@@ -133,6 +136,11 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 	for i, item := range mccObj.Status.Inevntory {
 		if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
 			foundCanary = true
+			// if the Canary has already had its rollout approved then skip to the next one.
+			if item.State == multiclusterv1alpha1.RolloutApproved {
+				continue
+			}
+
 			item.State = multiclusterv1alpha1.RolloutApproved
 			mccObj.Status.Inevntory[i] = item
 			if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
@@ -141,6 +149,7 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			logger.Infof("updated mcc %s/%s status", mccObj.Namespace, mccObj.Name)
+
 			// if this canary is being retried, we don't need to wait for other
 			// canaries' rollout to be apporved.
 			if item.Retries > 0 {
@@ -149,6 +158,9 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+		// if there's a Canary who hasn't had it's rollout approved we can't allow
+		// other Canaries to start their rollouts (with the exception of timeout being exceeded
+		// which is handled later)
 		if item.State != multiclusterv1alpha1.RolloutApproved {
 			startRollout = false
 		} else {
@@ -235,7 +247,24 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 	for i, item := range mccObj.Status.Inevntory {
 		if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
 			foundCanary = true
+			// if the Canary has already had its promotion approved then skip to the next one.
+			if item.State == multiclusterv1alpha1.PromotionApproved {
+				continue
+			}
 			item.State = multiclusterv1alpha1.PromotionApproved
+
+			// get retry annotation directly from the target Deployment as its the
+			// absolute source of truth about what's considered for the LastPromotedSpec
+			// of the Canary.
+			retryTs, err := c.getDeploymentRetryAnnotation(clusterName, clusterNamespace,
+				mccObj.Spec.TargetRef.Name, payload.Namespace)
+			if err != nil {
+				logger.Errorf("failed to read target deployment's retry annotation %s/%s: %w", mccObj.Namespace, mccObj.Name, err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			item.LastPromotedRetryTimestamp = retryTs
+
 			mccObj.Status.Inevntory[i] = item
 			if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
 				logger.Errorf("could not update mcc %s/%s status: %w", mccObj.Namespace, mccObj.Name, err)
@@ -244,6 +273,9 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 			}
 			logger.Infof("updated mcc %s/%s status", mccObj.Namespace, mccObj.Name)
 		}
+
+		// if there's a Canary who hasn't had it's promotion approved we can't allow
+		// other Canaries to promote the canary Deployment as well.
 		if item.State != multiclusterv1alpha1.PromotionApproved {
 			shouldBePromoted = false
 		}
@@ -254,11 +286,13 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
 	if !shouldBePromoted {
 		logger.Debug("waiting for other canaries' promotion to be approved")
 		w.WriteHeader(http.StatusBadRequest)
 	} else {
 		mccObj.Status.Phase = multiclusterv1alpha1.Promoted
+		// Reset this field as _this_ rollout has been promoted and is over.
 		mccObj.Status.RolloutApprovedAt = nil
 		if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
 			logger.Errorf("could not update mcc %s/%s phase to %s: %w", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase, err)
@@ -321,13 +355,15 @@ func (c *Coordinator) PostRollout(w http.ResponseWriter, r *http.Request) {
 						logger.Infof("retrying canary %s/%s in cluster %s/%s",
 							payload.Namespace, payload.Name, clusterNamespace, clusterName)
 
-						if err := c.retryCanary(clusterName, clusterNamespace,
-							mccObj.Spec.TargetRef.Name, payload.Namespace); err != nil {
+						err := c.retryCanary(clusterName, clusterNamespace,
+							mccObj.Spec.TargetRef.Name, payload.Namespace)
+						if err != nil {
 							logger.Errorf("could not update deployment %s/%s retry annotation in %s/%s: %w",
 								mccObj.Spec.TargetRef.Name, payload.Namespace, clusterName, clusterNamespace, err)
 							w.WriteHeader(http.StatusInternalServerError)
 							return
 						}
+
 						item.Retries += 1
 						item.State = multiclusterv1alpha1.Retrying
 					}
@@ -400,7 +436,35 @@ func (c *Coordinator) retryCanary(clusterName, clusterNamespace, deploymentName,
 	}); err != nil {
 		return err
 	}
+
 	return nil
+}
+
+func (c *Coordinator) getDeploymentRetryAnnotation(clusterName, clusterNamespace, deploymentName, deploymentNamespace string) (string, error) {
+	clusterKey := types.NamespacedName{
+		Namespace: clusterNamespace,
+		Name:      clusterName,
+	}
+	clusterObj := &multiclusterv1alpha1.GitopsCluster{}
+	if err := c.Get(context.TODO(), clusterKey, clusterObj); err != nil {
+		return "", err
+	}
+	kubeClient, err := c.getClientForCluster(clusterObj)
+	if err != nil {
+		return "", err
+	}
+
+	deploymentKey := types.NamespacedName{
+		Namespace: deploymentNamespace,
+		Name:      deploymentName,
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err = kubeClient.Get(context.TODO(), deploymentKey, deployment); err != nil {
+		return "", err
+	}
+	retryTs := deployment.Spec.Template.Annotations[RetryKey]
+	return retryTs, nil
 }
 
 func (c *Coordinator) Rollback(w http.ResponseWriter, r *http.Request) {
