@@ -27,9 +27,11 @@ import (
 
 	multiclusterv1alpha1 "github.com/aryan9600/multi-cluster-flagger/api/v1alpha1"
 	flaggerv1 "github.com/fluxcd/flagger/pkg/apis/flagger/v1beta1"
+
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
@@ -127,6 +129,7 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 
 	startRollout := true
 	foundCanary := false
+	var approvedCanaries int
 	for i, item := range mccObj.Status.Inevntory {
 		if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
 			foundCanary = true
@@ -148,6 +151,8 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 		}
 		if item.State != multiclusterv1alpha1.RolloutApproved {
 			startRollout = false
+		} else {
+			approvedCanaries += 1
 		}
 	}
 
@@ -156,6 +161,30 @@ func (c *Coordinator) ConfirmRollout(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
+	// If the rollout is pending approval but we are still waiting for some Canaries
+	// to ask for approval, compare the time we first approved this rollout to
+	// the current time. If its more than the allowed timeout, then approve
+	// the rollout anyway.
+	if mccObj.Status.Phase == multiclusterv1alpha1.PendingRolloutApproval &&
+		mccObj.Status.RolloutApprovedAt != nil &&
+		metav1.Now().Sub(mccObj.Status.RolloutApprovedAt.Time) > mccObj.Spec.Timeout.Duration {
+		startRollout = true
+	}
+
+	// Record the time at which we approved the rollout for this particular
+	// set of Canaries.
+	if approvedCanaries == 1 && mccObj.Status.RolloutApprovedAt == nil {
+		now := metav1.Now()
+		mccObj.Status.RolloutApprovedAt = &now
+		if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
+			logger.Errorf("could not update mcc %s/%s status: %w", mccObj.Namespace, mccObj.Name, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		logger.Infof("updated mcc %s/%s status.rolloutApprovedAt: %v", mccObj.Namespace, mccObj.Name, mccObj.Status.RolloutApprovedAt)
+	}
+
 	if startRollout {
 		mccObj.Status.Phase = multiclusterv1alpha1.Progressing
 		if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
@@ -230,6 +259,7 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	} else {
 		mccObj.Status.Phase = multiclusterv1alpha1.Promoted
+		mccObj.Status.RolloutApprovedAt = nil
 		if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
 			logger.Errorf("could not update mcc %s/%s phase to %s: %w", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase, err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -410,6 +440,7 @@ func (c *Coordinator) Rollback(w http.ResponseWriter, r *http.Request) {
 		}
 
 		mccObj.Status.Phase = multiclusterv1alpha1.RolledBack
+		mccObj.Status.RolloutApprovedAt = nil
 		if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
 			logger.Errorf("could not update mcc %s/%s phase to %s: %w", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase, err)
 			w.WriteHeader(http.StatusInternalServerError)

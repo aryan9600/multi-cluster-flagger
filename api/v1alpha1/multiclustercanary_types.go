@@ -134,8 +134,9 @@ type PromotionStrategy struct {
 
 // MultiClusterCanaryStatus defines the observed state of MultiClusterCanary
 type MultiClusterCanaryStatus struct {
-	Inevntory []CanaryObjRef          `json:"inventory,omitempty"`
-	Phase     MultiClusterCanaryPhase `json:"phase,omitempty"`
+	Inevntory         []CanaryObjRef          `json:"inventory,omitempty"`
+	Phase             MultiClusterCanaryPhase `json:"phase,omitempty"`
+	RolloutApprovedAt *metav1.Time            `json:"rolloutApprovedAt,omitempty"`
 }
 
 type CanaryObjRef struct {
