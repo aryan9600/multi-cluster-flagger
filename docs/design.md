@@ -85,7 +85,8 @@ spec:
           matchLabels:
             weave.works/cluster-region: asia
         service:
-          name: podinfo-legacy
+          hosts:
+           - asia.cluster
   # Analysis config for the Canary objects.
   analysis:
     interval: 30s

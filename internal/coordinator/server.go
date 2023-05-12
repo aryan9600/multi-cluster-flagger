@@ -264,6 +264,7 @@ func (c *Coordinator) ConfirmPromotion(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			item.LastPromotedRetryTimestamp = retryTs
+			item.Retries = 0
 
 			mccObj.Status.Inevntory[i] = item
 			if err = c.Client.Status().Update(context.TODO(), mccObj); err != nil {
@@ -324,11 +325,19 @@ func (c *Coordinator) PostRollout(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Debugf("found matching mcc obj: %s/%s", mccObj.Namespace, mccObj.Name)
 
+	foundCanary := false
 	// We don't need to do anything if we are the ones who approved the rollback.
 	if payload.Phase == flaggerv1.CanaryPhaseFailed && mccObj.Status.Phase != multiclusterv1alpha1.RolledBack {
 		if mccObj.Spec.PromotionStrategy.Type == "strict" {
 			// mark the phase as PendingRollback because we want to rollback ALL canaries.
 			mccObj.Status.Phase = multiclusterv1alpha1.PendingRollback
+			for i, item := range mccObj.Status.Inevntory {
+				if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
+					foundCanary = true
+					failCanary(&item)
+				}
+				mccObj.Status.Inevntory[i] = item
+			}
 
 			err := retry.OnError(retry.DefaultRetry, func(err error) bool {
 				return err != nil
@@ -342,14 +351,12 @@ func (c *Coordinator) PostRollout(w http.ResponseWriter, r *http.Request) {
 			}
 			logger.Infof("updated mcc %s/%s phase to %s", mccObj.Namespace, mccObj.Name, mccObj.Status.Phase)
 		} else if mccObj.Spec.PromotionStrategy.Type == "pragmatic" {
-			foundCanary := false
 			for i, item := range mccObj.Status.Inevntory {
 				if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
 					foundCanary = true
 					// if we have exhausted the allowed no. of retries, then do a full rollback
 					if item.Retries == mccObj.GetFailedRetriesThreshold() {
-						item.Retries = 0
-						item.State = multiclusterv1alpha1.Failed
+						failCanary(&item)
 						mccObj.Status.Phase = multiclusterv1alpha1.PendingRollback
 					} else {
 						logger.Infof("retrying canary %s/%s in cluster %s/%s",
@@ -494,7 +501,7 @@ func (c *Coordinator) Rollback(w http.ResponseWriter, r *http.Request) {
 		for i, item := range mccObj.Status.Inevntory {
 			if item.ClusterName == clusterName && item.ClusterNamespace == clusterNamespace {
 				foundCanary = true
-				item.State = multiclusterv1alpha1.Failed
+				failCanary(&item)
 				mccObj.Status.Inevntory[i] = item
 			}
 		}
@@ -583,4 +590,9 @@ func (c *Coordinator) getMultiClusterCanary(name, namespace string) (*multiclust
 		return nil, err
 	}
 	return mccObj, nil
+}
+
+func failCanary(ref *multiclusterv1alpha1.CanaryObjRef) {
+	ref.State = multiclusterv1alpha1.Failed
+	ref.Retries = 0
 }
